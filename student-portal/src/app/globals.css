@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+  --primary: #6d28d9;
+  --primary-foreground: #ffffff;
+  --accent: #f5f3ff;
+  --card: #ffffff;
+  --card-foreground: #1a1a1a;
+  --border: #e2e8f0;
+}
+
+@layer base {
+  body {
+    @apply bg-[var(--background)] text-[var(--foreground)] antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+.premium-glass {
+  @apply bg-white/70 backdrop-blur-md border border-white/20 shadow-xl;
+}
+
+.purple-gradient {
+  @apply bg-gradient-to-br from-violet-600 to-indigo-700;
+}
+
+.glow-purple {
+  box-shadow: 0 0 20px rgba(109, 40, 217, 0.15);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-violet-200 rounded-full hover:bg-violet-300 transition-colors;
+}
