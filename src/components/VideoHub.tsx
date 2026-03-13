@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
-import { Play, MessageCircle, ChevronRight, User } from "lucide-react";
+import { Play, MessageCircle, ChevronRight, User, Pause, RotateCcw, RotateCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface Video {
@@ -22,6 +22,13 @@ interface Comment {
   profiles?: { display_name: string; avatar_url: string };
 }
 
+declare global {
+  interface Window {
+    onYouTubeIframeAPIReady: () => void;
+    YT: any;
+  }
+}
+
 export default function VideoHub() {
   const [videos, setVideos] = useState<Video[]>([]);
   const [activeVideo, setActiveVideo] = useState<Video | null>(null);
@@ -29,14 +36,86 @@ export default function VideoHub() {
   const [newComment, setNewComment] = useState("");
   const [loading, setLoading] = useState(true);
 
+  // Video Player state
+  const [player, setPlayer] = useState<any>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const playerRef = useRef<HTMLDivElement>(null);
+  const progressInterval = useRef<NodeJS.Timeout | null>(null);
+
   useEffect(() => {
     fetchVideos();
+    loadYoutubeAPI();
   }, []);
+
+  function loadYoutubeAPI() {
+    if (window.YT) return;
+    const tag = document.createElement("script");
+    tag.src = "https://www.youtube.com/iframe_api";
+    const firstScriptTag = document.getElementsByTagName("script")[0];
+    firstScriptTag.parentNode?.insertBefore(tag, firstScriptTag);
+
+    window.onYouTubeIframeAPIReady = () => {
+      console.log("YouTube API Ready");
+    };
+  }
+
+  useEffect(() => {
+    if (activeVideo && window.YT && window.YT.Player) {
+      if (player) {
+        player.loadVideoById(getYouTubeId(activeVideo.youtube_url));
+        setIsPlaying(false);
+      } else {
+        const newPlayer = new window.YT.Player("custom-player", {
+          videoId: getYouTubeId(activeVideo.youtube_url),
+          playerVars: {
+            controls: 0,
+            disablekb: 1,
+            modestbranding: 1,
+            rel: 0,
+            showinfo: 0,
+            fs: 0,
+          },
+          events: {
+            onReady: (event: any) => {
+              setPlayer(event.target);
+              setDuration(event.target.getDuration());
+            },
+            onStateChange: (event: any) => {
+              if (event.data === window.YT.PlayerState.PLAYING) {
+                setIsPlaying(true);
+                startProgressTracker(event.target);
+              } else {
+                setIsPlaying(false);
+                stopProgressTracker();
+              }
+            },
+          },
+        });
+      }
+    }
+  }, [activeVideo, player]);
+
+  function startProgressTracker(playerInstance: any) {
+    stopProgressTracker();
+    progressInterval.current = setInterval(() => {
+      const currentTime = playerInstance.getCurrentTime();
+      const videoDuration = playerInstance.getDuration();
+      setDuration(videoDuration);
+      setProgress((currentTime / videoDuration) * 100);
+    }, 1000);
+  }
+
+  function stopProgressTracker() {
+    if (progressInterval.current) {
+      clearInterval(progressInterval.current);
+    }
+  }
 
   useEffect(() => {
     if (activeVideo) {
       fetchComments(activeVideo.id);
-      // Subscribe to real-time comments
       const channel = supabase
         .channel(`video-comments-${activeVideo.id}`)
         .on(
@@ -55,12 +134,13 @@ export default function VideoHub() {
 
       return () => {
         supabase.removeChannel(channel);
+        stopProgressTracker();
       };
     }
   }, [activeVideo]);
 
   async function fetchVideos() {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from("videos")
       .select("*")
       .order("index", { ascending: true });
@@ -72,7 +152,7 @@ export default function VideoHub() {
   }
 
   async function fetchComments(videoId: number) {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from("comments")
       .select("*, profiles(display_name, avatar_url)")
       .eq("video_id", videoId)
@@ -82,23 +162,19 @@ export default function VideoHub() {
 
   async function handleAddComment() {
     if (!newComment.trim() || !activeVideo) return;
-    
-    // In a real app, we'd ensure the user is logged in
     const { data: userData } = await supabase.auth.getUser();
     if (!userData.user) {
         alert("Please sign in to post a doubt!");
         return;
     }
-
     const { error } = await supabase.from("comments").insert({
       video_id: activeVideo.id,
       user_id: userData.user.id,
       content: newComment,
     });
-
     if (!error) {
       setNewComment("");
-      fetchComments(activeVideo.id); // Fallback for profile data
+      fetchComments(activeVideo.id);
     }
   }
 
@@ -106,6 +182,28 @@ export default function VideoHub() {
     const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
     const match = url.match(regExp);
     return (match && match[2].length === 11) ? match[2] : null;
+  };
+
+  const togglePlay = () => {
+    if (!player) return;
+    if (isPlaying) {
+      player.pauseVideo();
+    } else {
+      player.playVideo();
+    }
+  };
+
+  const skip = (amount: number) => {
+    if (!player) return;
+    const currentTime = player.getCurrentTime();
+    player.seekTo(currentTime + amount, true);
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!player) return;
+    const seekTo = (parseFloat(e.target.value) / 100) * duration;
+    player.seekTo(seekTo, true);
+    setProgress(parseFloat(e.target.value));
   };
 
   if (loading) return <div className="h-screen flex items-center justify-center bg-white text-purple-600 font-heading text-2xl animate-pulse">Loading Premium Portal...</div>;
@@ -131,29 +229,59 @@ export default function VideoHub() {
       <main className="max-w-[1600px] mx-auto p-4 sm:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8">
         {/* Main Content: Video & Metadata */}
         <div className="lg:col-span-8 flex flex-col gap-6 md:gap-8">
-          {/* Main Video Section */}
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="aspect-video w-full rounded-xl md:rounded-2xl overflow-hidden shadow-2xl bg-black glow-purple"
-          >
-            {activeVideo && (
-              <iframe
-                className="w-full h-full"
-                src={`https://www.youtube.com/embed/${getYouTubeId(activeVideo.youtube_url)}?autoplay=0&rel=0&modestbranding=1`}
-                title={activeVideo.title}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-              ></iframe>
-            )}
-          </motion.div>
+          {/* Custom Video Player Holder */}
+          <div className="relative group">
+            <motion.div 
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="aspect-video w-full rounded-xl md:rounded-2xl overflow-hidden shadow-2xl bg-black glow-purple relative"
+            >
+                <div id="custom-player" className="w-full h-full pointer-events-none"></div>
+                
+                {/* Custom Overlay Controls */}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4 md:p-6">
+                    {/* Progress Bar */}
+                    <div className="relative w-full mb-4 md:mb-6">
+                        <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={progress}
+                            onChange={handleSeek}
+                            className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-purple-500 hover:h-2 transition-all"
+                        />
+                    </div>
+
+                    {/* Bottom Controls */}
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-4 md:gap-8">
+                            <button onClick={() => skip(-10)} className="text-white hover:text-purple-400 transition-colors p-2 bg-white/10 rounded-full backdrop-blur-sm">
+                                <RotateCcw className="w-5 h-5 md:w-6 md:h-6" />
+                            </button>
+                            
+                            <button onClick={togglePlay} className="w-12 h-12 md:w-16 md:h-16 bg-purple-600 text-white rounded-full flex items-center justify-center shadow-lg hover:scale-110 transition-transform active:scale-95">
+                                {isPlaying ? <Pause className="fill-white w-6 h-6 md:w-8 md:h-8" /> : <Play className="fill-white translate-x-1 w-6 h-6 md:w-8 md:h-8" />}
+                            </button>
+
+                            <button onClick={() => skip(10)} className="text-white hover:text-purple-400 transition-colors p-2 bg-white/10 rounded-full backdrop-blur-sm">
+                                <RotateCw className="w-5 h-5 md:w-6 md:h-6" />
+                            </button>
+                        </div>
+
+                        <div className="hidden sm:block text-white/80 font-mono text-sm">
+                            {Math.floor((progress / 100 * duration) / 60)}:{(Math.floor((progress / 100 * duration) % 60)).toString().padStart(2, '0')} / {Math.floor(duration / 60)}:{(Math.floor(duration % 60)).toString().padStart(2, '0')}
+                        </div>
+                    </div>
+                </div>
+            </motion.div>
+          </div>
 
           <div className="px-1">
             <h2 className="text-2xl md:text-3xl font-heading font-bold text-gray-900 mb-2 md:mb-3 leading-tight">{activeVideo?.title}</h2>
             <p className="text-gray-500 text-base md:text-lg leading-relaxed max-w-3xl">{activeVideo?.description}</p>
           </div>
 
-          {/* Curriculum - Mobile Only View (placed between video and doubts) */}
+          {/* Curriculum - Mobile Only View */}
           <div className="lg:hidden">
             <div className="bg-white rounded-2xl p-5 border border-purple-100 shadow-sm">
                 <h3 className="text-lg font-heading font-bold text-gray-900 mb-4 flex items-center justify-between">
@@ -187,7 +315,7 @@ export default function VideoHub() {
             </div>
           </div>
 
-          {/* Doubt/Comment Section */}
+          {/* Doubt Section */}
           <section className="bg-white rounded-2xl md:rounded-3xl p-5 md:p-8 border border-purple-100 shadow-sm">
             <div className="flex items-center gap-3 mb-6 md:mb-8">
               <MessageCircle className="text-purple-600 w-5 h-5 md:w-6 md:h-6" />
@@ -202,16 +330,11 @@ export default function VideoHub() {
                 <textarea
                   value={newComment}
                   onChange={(e) => setNewComment(e.target.value)}
-                  placeholder="Ask a doubt about this class..."
-                  className="w-full bg-purple-50/30 border border-purple-100 p-4 rounded-xl md:rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-200 transition-all text-gray-700 min-h-[100px] text-sm md:text-base"
+                  placeholder="Ask a doubt..."
+                  className="w-full bg-purple-50/30 border border-purple-100 p-4 rounded-xl md:rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-200 transition-all font-medium text-gray-700 min-h-[100px] text-sm md:text-base"
                 />
                 <div className="mt-3 flex justify-end">
-                  <button 
-                    onClick={handleAddComment}
-                    className="w-full sm:w-auto px-6 py-3 md:py-2.5 purple-gradient text-white rounded-xl font-bold shadow-lg shadow-purple-100 hover:opacity-90 transition-opacity"
-                  >
-                    Post Question
-                  </button>
+                  <button onClick={handleAddComment} className="w-full sm:w-auto px-6 py-3 md:py-2.5 purple-gradient text-white rounded-xl font-bold hover:opacity-90 transition-opacity">Post Question</button>
                 </div>
               </div>
             </div>
@@ -226,13 +349,13 @@ export default function VideoHub() {
                     exit={{ opacity: 0, scale: 0.95 }}
                     className="flex gap-3 md:gap-4 p-3 md:p-4 rounded-xl md:rounded-2xl hover:bg-purple-50/50 transition-colors border border-transparent hover:border-purple-100"
                   >
-                    <div className="w-8 h-8 md:w-10 md:h-10 bg-white border border-purple-100 rounded-full flex items-center justify-center shrink-0">
+                    <div className="w-8 h-8 md:w-10 md:h-10 bg-white border border-purple-100 rounded-full flex items-center justify-center shrink-0 shadow-sm">
                       <User className="text-purple-400 w-4 h-4 md:w-5 md:h-5" />
                     </div>
                     <div>
                       <div className="flex items-center gap-2 mb-1">
                         <span className="font-bold text-sm md:text-base text-gray-900">{comment.profiles?.display_name || "Student"}</span>
-                        <span className="text-[10px] md:text-xs text-gray-400 capitalize">• {new Date(comment.created_at).toLocaleDateString()}</span>
+                        <span className="text-[10px] md:text-xs text-gray-400">• {new Date(comment.created_at).toLocaleDateString()}</span>
                       </div>
                       <p className="text-gray-600 text-sm md:text-base leading-relaxed">{comment.content}</p>
                     </div>
@@ -243,11 +366,11 @@ export default function VideoHub() {
           </section>
         </div>
 
-        {/* Desktop Sidebar (Hidden on mobile) */}
+        {/* Desktop Sidebar */}
         <div className="hidden lg:block lg:col-span-4">
           <div className="sticky top-28">
             <div className="premium-glass rounded-3xl p-6 border border-purple-100">
-              <h3 className="text-xl font-heading font-bold text-gray-900 mb-6">Course Curriculum</h3>
+              <h3 className="text-xl font-heading font-bold text-gray-900 mb-6 underline decoration-purple-100 underline-offset-8">Course Curriculum</h3>
               <div className="space-y-3">
                 {videos.map((v) => (
                   <button
@@ -256,55 +379,43 @@ export default function VideoHub() {
                     className={cn(
                       "w-full group text-left p-4 rounded-2xl flex items-center gap-4 transition-all duration-300",
                       activeVideo?.id === v.id 
-                        ? "bg-purple-600 text-white shadow-xl shadow-purple-200" 
+                        ? "bg-purple-600 text-white shadow-xl shadow-purple-200 scale-[1.02]" 
                         : "hover:bg-purple-50 text-gray-600 hover:text-purple-600"
                     )}
                   >
                     <div className={cn(
-                      "w-10 h-10 rounded-xl flex items-center justify-center transition-colors",
+                      "w-10 h-10 rounded-xl flex items-center justify-center transition-colors shadow-sm",
                       activeVideo?.id === v.id ? "bg-white/20" : "bg-purple-100 group-hover:bg-purple-200"
                     )}>
-                      {activeVideo?.id === v.id ? 
-                        <Play className="w-4 h-4 text-white fill-white" /> : 
-                        <span className="text-sm font-bold text-purple-600">{v.index}</span>
-                      }
+                      {activeVideo?.id === v.id ? <Play className="w-4 h-4 text-white fill-white" /> : <span className="text-sm font-bold text-purple-600">{v.index}</span>}
                     </div>
                     <div className="flex-1">
                       <div className="text-sm font-bold truncate">{v.title}</div>
-                      <div className={cn(
-                        "text-[10px] uppercase tracking-wider font-bold mt-0.5",
-                        activeVideo?.id === v.id ? "text-white/60" : "text-gray-400"
-                      )}>
-                        Chapter {v.index}
-                      </div>
+                      <div className={cn("text-[10px] uppercase tracking-wider font-bold mt-0.5", activeVideo?.id === v.id ? "text-white/60" : "text-gray-400")}>Chapter {v.index}</div>
                     </div>
-                    <ChevronRight className={cn(
-                      "w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity",
-                      activeVideo?.id === v.id && "opacity-100"
-                    )} />
+                    <ChevronRight className={cn("w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity", activeVideo?.id === v.id && "opacity-100")} />
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Premium Upsell Card */}
             <div className="mt-6 purple-gradient rounded-3xl p-6 text-white shadow-2xl relative overflow-hidden group">
                 <div className="absolute top-0 right-0 p-4 opacity-20 transform translate-x-4 -translate-y-4">
                     <div className="w-32 h-32 rounded-full border-8 border-white"></div>
                 </div>
                 <h4 className="text-xl font-heading font-bold mb-2 text-white">Expert Certificate</h4>
-                <p className="text-white/80 text-sm mb-4">Complete all chapters and pass the final exam to earn your certificate.</p>
-                <button className="w-full bg-white text-purple-600 py-3 rounded-xl font-bold hover:bg-violet-50 transition-colors">Apply Now</button>
+                <p className="text-white/80 text-sm mb-4 leading-relaxed">Complete all chapters and pass the final exam to earn your professional badge.</p>
+                <button className="w-full bg-white text-purple-600 py-3 rounded-xl font-bold hover:bg-violet-50 transition-colors shadow-lg">Apply Now</button>
             </div>
           </div>
         </div>
 
-        {/* Mobile-only Upsell Card (Fixed at bottom or below content) */}
         <div className="lg:hidden mt-4">
-            <div className="purple-gradient rounded-2xl p-6 text-white shadow-xl">
+            <div className="purple-gradient rounded-2xl p-6 text-white shadow-xl relative overflow-hidden">
+                <div className="absolute -bottom-10 -right-10 w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
                 <h4 className="text-lg font-heading font-bold mb-1 text-white">Expert Certificate</h4>
-                <p className="text-white/80 text-xs mb-4">Unlock your professional badge today.</p>
-                <button className="w-full bg-white text-purple-600 py-3 rounded-xl font-bold shadow-lg">Apply Now</button>
+                <p className="text-white/80 text-xs mb-4">Complete your journey and get certified.</p>
+                <button className="w-full bg-white text-purple-600 py-3 rounded-xl font-bold shadow-lg">Claim Now</button>
             </div>
         </div>
       </main>
